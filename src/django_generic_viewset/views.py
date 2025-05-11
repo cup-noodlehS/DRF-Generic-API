@@ -23,6 +23,7 @@ class GenericView(viewsets.ViewSet):
     - allowed_methods: list of allowed methods (default: ['list', 'retrieve', 'create', 'update', 'delete'])
     - allowed_filter_fields: list of allowed filter fields (default: ['*'])
     - allowed_update_fields: list of allowed update fields (default: ['*'])
+    - allowed_fields: list of fields that can be selected (default: ['*'])
     - size_per_request: number of objects to return per request (default: 20)
     - permission_classes: list of permission classes
     - cache_key_prefix: cache key prefix
@@ -38,6 +39,7 @@ class GenericView(viewsets.ViewSet):
     **Features**
     - Pagination
     - Filtering
+    - Field selection
     - Caching
     - CRUD operations
     """
@@ -50,9 +52,11 @@ class GenericView(viewsets.ViewSet):
     allowed_methods = ["list", "create", "retrieve", "update", "delete"]
     allowed_filter_fields = ["*"]  # list of allowed filter fields
     allowed_update_fields = ["*"]  # list of allowed update fields
+    allowed_fields = ["*"]  # Fields that can be selected (set to ["*"] to allow all fields)
 
     cache_key_prefix = None  # cache key prefix
     cache_duration = 60 * 60  # cache duration in seconds
+    _dynamic_serializer_class = None  # cached dynamic serializer class
 
     def __init__(self):
         if self.queryset is None or not self.serializer_class:
@@ -68,35 +72,37 @@ class GenericView(viewsets.ViewSet):
         try:
             filters, excludes = self.parse_query_params(request)
             top, bottom, order_by = self.get_pagination_params(filters)
+            fields = self.parse_fields(filters.pop("fields", None))
 
             cached_data = None
             if self.cache_key_prefix:
                 cache_key = self.get_list_cache_key(
-                    filters, excludes, top, bottom, order_by
+                    filters, excludes, top, bottom, order_by, fields
                 )
                 cached_data = cache.get(cache_key)
             if cached_data:
                 return Response(cached_data, status=status.HTTP_200_OK)
 
-            return self.filter(request, filters, excludes, top, bottom, order_by)
+            return self.filter(request, filters, excludes, top, bottom, order_by, fields)
         except ValidationError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def retrieve(self, request, pk=None):
         if "retrieve" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
-        
+
         self.crud_middleware(request)
+        fields = self.parse_fields(request.query_params.get("fields", None))
 
         cached_object = None
         if self.cache_key_prefix:
-            cache_key = self.get_object_cache_key(pk)
+            cache_key = self.get_object_cache_key(pk, fields)
             cached_object = cache.get(cache_key)
         if cached_object:
             return Response(cached_object, status=status.HTTP_200_OK)
 
-        object = self.get_serialized_object(pk)
-        self.cache_object(object, pk)
+        object = self.get_serialized_object(pk, fields)
+        self.cache_object(object, pk, fields)
         return Response(object, status=status.HTTP_200_OK)
 
     @transaction.atomic
@@ -122,10 +128,9 @@ class GenericView(viewsets.ViewSet):
         if "update" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
+        instance = get_object_or_404(self.queryset, pk=pk)
         self.crud_middleware(request)
         self.pre_update(request, instance)
-
-        instance = get_object_or_404(self.queryset, pk=pk)
 
         if "*" not in self.allowed_update_fields:
             for field in request.data.keys():
@@ -138,7 +143,7 @@ class GenericView(viewsets.ViewSet):
         serializer = self.serializer_class(instance, data=request.data, partial=True, context=self.serializer_context)
         if serializer.is_valid():
             serializer.save()
-            self.cache_object(serializer.data, pk)
+            self.invalidate_object_cache(pk)
             self.invalidate_list_cache()
 
             self.post_update(request, instance)
@@ -153,7 +158,7 @@ class GenericView(viewsets.ViewSet):
         self.crud_middleware(request)
 
         instance = get_object_or_404(self.queryset, pk=pk)
-        self.delete_cache(pk)
+        self.invalidate_object_cache(pk)
         self.invalidate_list_cache()
         self.pre_destroy(instance)
         if hasattr(instance, "removed"):
@@ -185,30 +190,31 @@ class GenericView(viewsets.ViewSet):
         pass
 
     # Cache operations
-    def delete_cache(self, pk):
+    def invalidate_object_cache(self, pk):
         if not self.cache_key_prefix:
             return
-        cache_key = self.get_object_cache_key(pk)
-        cache.delete(cache_key)
+        cache.delete_pattern(f"{self.cache_key_prefix}_object_{pk}_*")
 
     def invalidate_list_cache(self):
         if not self.cache_key_prefix:
             return
         cache.delete_pattern(f"{self.cache_key_prefix}_list_*")
 
-    def cache_object(self, object_data, pk):
+    def cache_object(self, object_data, pk, fields=None):
         if not self.cache_key_prefix:
             return
-        cache_key = self.get_object_cache_key(pk)
+        cache_key = self.get_object_cache_key(pk, fields)
         cache.set(cache_key, object_data, self.cache_duration)
 
-    def get_object_cache_key(self, pk):
-        return f"{self.cache_key_prefix}_object_{pk}"
+    def get_object_cache_key(self, pk, fields=None):
+        fields_str = ",".join(sorted(fields)) if fields else "None"
+        return f"{self.cache_key_prefix}_object_{pk}_{fields_str}"
 
-    def get_list_cache_key(self, filters, excludes, top, bottom, order_by):
+    def get_list_cache_key(self, filters, excludes, top, bottom, order_by, fields=None):
+        fields_str = ",".join(sorted(fields)) if fields else "None"
         return (
             f"{self.cache_key_prefix}_list_{hash(frozenset(filters.items()))}_"
-            f"{hash(frozenset(excludes.items()))}_{top}_{bottom}_{order_by}"
+            f"{hash(frozenset(excludes.items()))}_{top}_{bottom}_{order_by}_{fields_str}"
         )
 
     # Helper methods
@@ -242,6 +248,24 @@ class GenericView(viewsets.ViewSet):
 
         return filters, excludes
 
+    def parse_fields(self, fields_param):
+        """Parse and validate the fields parameter."""
+        if not fields_param:
+            return None
+            
+        if isinstance(fields_param, str):
+            fields = [f.strip() for f in fields_param.split(',') if f.strip()]
+        elif isinstance(fields_param, list):
+            fields = fields_param
+        else:
+            fields = [fields_param]
+            
+        # Filter fields based on allowed_fields
+        if "*" not in self.allowed_fields:
+            fields = [f for f in fields if f in self.allowed_fields]
+            
+        return fields if fields else None
+
     def get_pagination_params(self, filters):
         page = filters.pop("page", None)
         top = int(filters.pop("top", 0))
@@ -259,7 +283,7 @@ class GenericView(viewsets.ViewSet):
         exclude_q = Q(**excludes)
         return self.queryset.filter(filter_q).exclude(exclude_q)
 
-    def filter(self, request, filters, excludes, top, bottom, order_by=None):
+    def filter(self, request, filters, excludes, top, bottom, order_by=None, fields=None):
         queryset = self.filter_queryset(filters, excludes)
 
         if order_by:
@@ -273,7 +297,8 @@ class GenericView(viewsets.ViewSet):
         else:
             page = queryset[top:bottom]
 
-        serializer = self.serializer_class(page, many=True, context=self.serializer_context)
+        serializer = self.get_serializer_for_fields(page, fields, many=True)
+            
         data = None
         if bottom is None:
             data = {
@@ -288,14 +313,50 @@ class GenericView(viewsets.ViewSet):
                 "total_count": queryset.count(),
             }
 
-        cache_key = self.get_list_cache_key(filters, excludes, top, bottom, order_by)
+        cache_key = self.get_list_cache_key(filters, excludes, top, bottom, order_by, fields)
         cache.set(cache_key, data, self.cache_duration)
 
         return Response(data, status=status.HTTP_200_OK)
 
-    def get_serialized_object(self, pk):
+    def get_serializer_for_fields(self, instance, fields=None, many=False):
+        """Get the appropriate serializer based on field selection."""
+        if fields:
+            return self.get_dynamic_fields_serializer_class()(
+                instance, 
+                fields=fields, 
+                context=self.serializer_context, 
+                many=many
+            )
+        else:
+            return self.serializer_class(
+                instance, 
+                context=self.serializer_context, 
+                many=many
+            )
+
+    def get_serialized_object(self, pk, fields=None):
         instance = get_object_or_404(self.queryset, pk=pk)
-        return self.serializer_class(instance, context=self.serializer_context).data
+        serializer = self.get_serializer_for_fields(instance, fields)
+        return serializer.data
+
+    def get_dynamic_fields_serializer_class(self):
+        """Return a cached version of the dynamic fields serializer class."""
+        if self._dynamic_serializer_class is None:
+            class DynamicFieldsModelSerializer(self.serializer_class):
+                """
+                A ModelSerializer that takes an additional `fields` argument that
+                controls which fields should be displayed.
+                """
+                def __init__(self, *args, **kwargs):
+                    fields = kwargs.pop("fields", None)
+                    super().__init__(*args, **kwargs)
+                    if fields is not None:
+                        allowed = set(fields)
+                        existing = set(self.fields)
+                        for field_name in existing - allowed:
+                            self.fields.pop(field_name)
+            self._dynamic_serializer_class = DynamicFieldsModelSerializer
+        return self._dynamic_serializer_class
     
     def initialize_queryset(self):
         if hasattr(self.queryset.model, 'removed'):
