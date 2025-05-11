@@ -44,6 +44,7 @@ class GenericView(viewsets.ViewSet):
 
     queryset = None  # the model queryset
     serializer_class = None  # DRF model serializer class
+    serializer_context = {}  # serializer context
     size_per_request = 20  # number of objects to return per request
     permission_classes = []  # list of permission classes
     allowed_methods = ["list", "create", "retrieve", "update", "delete"]
@@ -61,6 +62,8 @@ class GenericView(viewsets.ViewSet):
     def list(self, request):
         if "list" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+        
+        self.crud_middleware(request)
 
         try:
             filters, excludes = self.parse_query_params(request)
@@ -82,6 +85,8 @@ class GenericView(viewsets.ViewSet):
     def retrieve(self, request, pk=None):
         if "retrieve" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+        
+        self.crud_middleware(request)
 
         cached_object = None
         if self.cache_key_prefix:
@@ -98,10 +103,11 @@ class GenericView(viewsets.ViewSet):
     def create(self, request):
         if "create" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
-
+        
+        self.crud_middleware(request)
         self.pre_create(request)
 
-        serializer = self.serializer_class(data=request.data)
+        serializer = self.serializer_class(data=request.data, context=self.serializer_context)
         if serializer.is_valid():
             instance = serializer.save()
             self.cache_object(serializer.data, instance.pk)
@@ -116,8 +122,10 @@ class GenericView(viewsets.ViewSet):
         if "update" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
-        instance = get_object_or_404(self.queryset, pk=pk)
+        self.crud_middleware(request)
         self.pre_update(request, instance)
+
+        instance = get_object_or_404(self.queryset, pk=pk)
 
         if "*" not in self.allowed_update_fields:
             for field in request.data.keys():
@@ -127,7 +135,7 @@ class GenericView(viewsets.ViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-        serializer = self.serializer_class(instance, data=request.data, partial=True)
+        serializer = self.serializer_class(instance, data=request.data, partial=True, context=self.serializer_context)
         if serializer.is_valid():
             serializer.save()
             self.cache_object(serializer.data, pk)
@@ -141,6 +149,8 @@ class GenericView(viewsets.ViewSet):
     def destroy(self, request, pk=None):
         if "delete" not in self.allowed_methods:
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        self.crud_middleware(request)
 
         instance = get_object_or_404(self.queryset, pk=pk)
         self.delete_cache(pk)
@@ -263,7 +273,7 @@ class GenericView(viewsets.ViewSet):
         else:
             page = queryset[top:bottom]
 
-        serializer = self.serializer_class(page, many=True)
+        serializer = self.serializer_class(page, many=True, context=self.serializer_context)
         data = None
         if bottom is None:
             data = {
@@ -285,4 +295,12 @@ class GenericView(viewsets.ViewSet):
 
     def get_serialized_object(self, pk):
         instance = get_object_or_404(self.queryset, pk=pk)
-        return self.serializer_class(instance).data
+        return self.serializer_class(instance, context=self.serializer_context).data
+    
+    def initialize_queryset(self):
+        if hasattr(self.queryset.model, 'removed'):
+            self.queryset = self.queryset.filter(removed=False)
+
+    def crud_middleware(self, request, *args, **kwargs):
+        self.request = request
+        self.initialize_queryset()
