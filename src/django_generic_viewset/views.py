@@ -53,6 +53,7 @@ class GenericView(viewsets.ViewSet):
     allowed_filter_fields = ["*"]  # list of allowed filter fields
     allowed_update_fields = ["*"]  # list of allowed update fields
     allowed_fields = ["*"]  # Fields that can be selected (set to ["*"] to allow all fields)
+    search_fields = []
 
     cache_key_prefix = None  # cache key prefix
     cache_duration = 60 * 60  # cache duration in seconds
@@ -279,7 +280,14 @@ class GenericView(viewsets.ViewSet):
         return top, bottom, order_by
 
     def filter_queryset(self, filters, excludes):
-        filter_q = Q(**filters)
+        search = filters.pop("search", None)
+        if search and self.search_fields:
+            search_q = Q()
+            for field in self.search_fields:
+                search_q |= Q(**{f"{field}__icontains": search})
+            filter_q = Q(**filters) & search_q
+        else:
+            filter_q = Q(**filters)
         exclude_q = Q(**excludes)
         return self.queryset.filter(filter_q).exclude(exclude_q)
 
