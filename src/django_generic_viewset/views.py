@@ -271,6 +271,10 @@ class GenericView(viewsets.ViewSet):
         page = filters.pop("page", None)
         top = int(filters.pop("top", 0))
         order_by = filters.pop("order_by", None)
+        order_direction = filters.pop("order_direction", None)
+
+        if order_direction == "desc" and order_by and not order_by.startswith("-"):
+            order_by = f"-{order_by}"
 
         if page is not None:
             top = (int(page) - 1) * self.size_per_request

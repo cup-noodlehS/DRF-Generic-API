@@ -150,6 +150,15 @@ export interface ListResponse<T> {
     current_page: number;
 }
 
+interface FilterParams {
+    page?: number;
+    order_by?: string;
+    order_direction?: 'asc' | 'desc';
+    search?: string;
+    [key: string]: any; // Allow additional properties
+}
+
+
 // Generic API class with better typing
 export class GenericApi<ReadType, WriteType = ReadType> {
     private endpoint: string;
@@ -171,7 +180,7 @@ export class GenericApi<ReadType, WriteType = ReadType> {
         }
     }
 
-    async filter(filters?: Record<string, any>): Promise<ListResponse<ReadType>> {
+    async filter(filters?: FilterParams): Promise<ListResponse<ReadType>> {
         try {
             const response = await api.get(`${this.endpoint}/`, {
                 params: filters,
