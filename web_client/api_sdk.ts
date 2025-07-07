@@ -159,67 +159,94 @@ interface FilterParams {
 }
 
 
-// Generic API class with better typing
-export class GenericApi<ReadType, WriteType = ReadType> {
+export class GenericApi<ReadType, WriteType> {
     private endpoint: string;
+    private allowedMethods: string[];
 
-    constructor(endpoint: string) {
+    constructor(
+        endpoint: string,
+        allowedMethods: string[] = ['get', 'filter', 'create', 'update', 'delete']
+    ) {
         if (!endpoint) {
             throw new Error('Endpoint is required for GenericApi');
         }
-        this.endpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+        this.endpoint = endpoint;
+        this.allowedMethods = allowedMethods;
     }
 
-    async get(id: number | string): Promise<ReadType> {
+    async get(id: number) {
         try {
+            if (!this.allowedMethods.includes('get')) {
+                throw new Error('Method not allowed');
+            }
             const response = await api.get(`${this.endpoint}/${id}/`);
-            return response.data;
+            return response.data as ReadType;
         } catch (error) {
             console.error(`Error in ${this.endpoint}-get:`, error);
             throw error;
         }
     }
 
-    async filter(filters?: FilterParams): Promise<ListResponse<ReadType>> {
+    async filter(filters?: FilterParams) {
+        interface FilterResponse {
+            objects: ReadType[];
+            total_count: number;
+            num_pages: number;
+            current_page: number;
+        }
         try {
+            if (!this.allowedMethods.includes('filter')) {
+                throw new Error('Method not allowed');
+            }
             const response = await api.get(`${this.endpoint}/`, {
                 params: filters,
             });
-            return response.data;
+            return response.data as FilterResponse;
         } catch (error) {
             console.error(`Error in ${this.endpoint}-filter:`, error);
             throw error;
         }
     }
 
-    async create(data: WriteType): Promise<ReadType> {
+    async create(data: WriteType) {
         try {
+            if (!this.allowedMethods.includes('create')) {
+                throw new Error('Method not allowed');
+            }
             const response = await api.post(`${this.endpoint}/`, data);
-            return response.data;
+            return response.data as ReadType;
         } catch (error) {
             console.error(`Error in ${this.endpoint}-create:`, error);
             throw error;
         }
     }
 
-    async update(id: number | string, data: Partial<WriteType>): Promise<ReadType> {
+    async update(id: number, data: Partial<WriteType>) {
         try {
+            if (!this.allowedMethods.includes('update')) {
+                throw new Error('Method not allowed');
+            }
             const response = await api.put(`${this.endpoint}/${id}/`, data);
-            return response.data;
+            return response.data as ReadType;
         } catch (error) {
             console.error(`Error in ${this.endpoint}-update:`, error);
             throw error;
         }
     }
 
-    async delete(id: number | string): Promise<void> {
+    async delete(id: number) {
         try {
-            await api.delete(`${this.endpoint}/${id}/`);
+            if (!this.allowedMethods.includes('delete')) {
+                throw new Error('Method not allowed');
+            }
+            const response = await api.delete(`${this.endpoint}/${id}/`);
+            return response.data;
         } catch (error) {
             console.error(`Error in ${this.endpoint}-delete:`, error);
             throw error;
         }
     }
 }
+
 
 export default api;
