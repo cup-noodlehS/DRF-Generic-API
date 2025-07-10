@@ -48,6 +48,7 @@ class GenericView(viewsets.ViewSet):
     serializer_class = None  # DRF model serializer class
     serializer_context = {}  # serializer context
     size_per_request = 20  # number of objects to return per request
+    paginate = True  # whether to paginate the response
     permission_classes = []  # list of permission classes
     allowed_methods = ["list", "create", "retrieve", "update", "delete"]
     allowed_filter_fields = ["*"]  # list of allowed filter fields
@@ -301,6 +302,26 @@ class GenericView(viewsets.ViewSet):
         if order_by:
             queryset = queryset.order_by(order_by)
 
+        # Handle non-paginated response
+        if not self.paginate:
+            # Apply top/bottom limits if specified
+            if bottom is not None:
+                objects = queryset[top:bottom]
+            elif top > 0:
+                objects = queryset[top:]
+            else:
+                objects = queryset
+            
+            serializer = self.get_serializer_for_fields(objects, fields, many=True)
+            
+            cache_key = self.get_list_cache_key(
+                filters, excludes, top, bottom, order_by, fields
+            )
+            cache.set(cache_key, serializer.data, self.cache_duration)
+            
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # Original pagination logic
         paginator = Paginator(queryset, self.size_per_request)
         page_number = (top // self.size_per_request) + 1
         page = None
