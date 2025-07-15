@@ -162,16 +162,19 @@ interface FilterParams {
 export class GenericApi<ReadType, WriteType> {
     private endpoint: string;
     private allowedMethods: string[];
+    private paginated: boolean;
 
     constructor(
         endpoint: string,
-        allowedMethods: string[] = ['get', 'filter', 'create', 'update', 'delete']
+        allowedMethods: string[] = ['get', 'filter', 'create', 'update', 'delete'],
+        paginated: boolean = true,
     ) {
         if (!endpoint) {
             throw new Error('Endpoint is required for GenericApi');
         }
         this.endpoint = endpoint;
         this.allowedMethods = allowedMethods;
+        this.paginated = paginated;
     }
 
     async get(id: number) {
@@ -201,7 +204,11 @@ export class GenericApi<ReadType, WriteType> {
             const response = await api.get(`${this.endpoint}/`, {
                 params: filters,
             });
-            return response.data as FilterResponse;
+            if (this.paginated) {
+                return response.data as FilterResponse;
+            } else {
+                return response.data as ReadType[];
+            }
         } catch (error) {
             console.error(`Error in ${this.endpoint}-filter:`, error);
             throw error;
